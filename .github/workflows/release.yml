@@ -1,12 +1,10 @@
 name: Auto Release
 
-# 触发方式：push 到 main（每次 manifest version 变化时自动建新 release），或手动触发
 on:
   push:
     branches: [main]
   workflow_dispatch:
 
-# 创建 release 需要写权限
 permissions:
   contents: write
 
@@ -16,35 +14,26 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0   # 拉取完整历史与 tags，便于判断 tag 是否已存在
 
-      - name: Read version from manifest.json
+      - name: Read manifest
         id: ver
         run: |
           MF=$(find custom_components -name manifest.json | head -n1)
-          if [ -z "$MF" ]; then
-            echo "未找到 custom_components/*/manifest.json"; exit 1
-          fi
+          if [ -z "$MF" ]; then echo "no manifest.json found"; exit 1; fi
           VERSION=$(python3 -c "import json;print(json.load(open('$MF'))['version'])")
-          echo "manifest=$MF" >> "$GITHUB_OUTPUT"
+          DOMAIN=$(python3 -c "import json;print(json.load(open('$MF'))['domain'])")
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "检测到版本: $VERSION ($MF)"
+          echo "domain=$DOMAIN" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION domain=$DOMAIN"
 
-      - name: Check if tag already exists
-        id: check
+      - name: Package integration zip
         run: |
-          if git rev-parse "v${{ steps.ver.outputs.version }}" >/dev/null 2>&1; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-            echo "tag v${{ steps.ver.outputs.version }} 已存在，跳过创建"
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-          fi
+          zip -r "${{ steps.ver.outputs.domain }}.zip" "custom_components/${{ steps.ver.outputs.domain }}"
 
-      - name: Create Release
-        if: steps.check.outputs.exists == 'false'
+      - name: Create or update Release (with zip asset)
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ steps.ver.outputs.version }}
           name: v${{ steps.ver.outputs.version }}
+          files: ${{ steps.ver.outputs.domain }}.zip
           generate_release_notes: true
