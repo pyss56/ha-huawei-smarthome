@@ -15,9 +15,34 @@ from .protocol import decode_message
 
 COMMAND_ACK_TIMEOUT = 10.0
 
+# Rejection codes observed on real devices. The raw code stays in the message
+# so logs remain greppable, and a short hint is appended when the cause is
+# known, otherwise the user only sees a bare number such as "errcode=10004".
+_COMMAND_ERROR_HINTS = {
+    1001: "device is offline",
+    10004: (
+        "third-party vendor authorization expired: re-sign in to that "
+        "vendor account inside the Huawei Smart Life app"
+    ),
+    16001: "value rejected by the device (wrong type or out of range)",
+}
+
+
+def _rejection_text(sid: str, errcode: int) -> str:
+    """Build one rejection message with an actionable hint when known."""
+
+    text = f"SmartHome command rejected: sid={sid} errcode={errcode}"
+    hint = _COMMAND_ERROR_HINTS.get(errcode)
+    return f"{text} ({hint})" if hint else text
+
 
 class HuaweiCommandRejectedError(HuaweiSmartHomeError):
     """The SmartHome cloud rejected a service command."""
+
+    def __init__(self, message: str, *, sid: str, errcode: int) -> None:
+        super().__init__(message)
+        self.sid = sid
+        self.errcode = errcode
 
 
 class HuaweiCommandGateway:
@@ -68,8 +93,9 @@ class HuaweiCommandGateway:
                 self._pending.pop(target, None)
             if remote_code != 0:
                 raise HuaweiCommandRejectedError(
-                    f"SmartHome command rejected: sid={sid} "
-                    f"errcode={remote_code}"
+                    _rejection_text(sid, remote_code),
+                    sid=sid,
+                    errcode=remote_code,
                 )
 
     def handle_message(self, payload: bytes) -> bool:

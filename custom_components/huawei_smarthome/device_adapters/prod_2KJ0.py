@@ -66,29 +66,41 @@ def _device_brightness_to_ha(
     value: Any,
     field: Mapping[str, Any],
 ) -> int | None:
+    """Convert the device brightness percentage to HA's 0-255 scale.
+
+    华为这个 Profile 用百分比表示亮度（unit=%），最小值 1 表示"最暗"而不是"关灯"，
+    因此**不能**把 min 当成偏移量做线性映射：那样 52% 会得到
+    round((52-1) * 255 / 99) = 131，在 HA 里显示成 131/255 = 51.4% → 51%，
+    比设备实际值少 1%。这里直接按 max 归一化，与项目内其它百分比亮度适配器一致。
+    """
+
     number = _number(value)
     minimum = _number(field.get("min"))
     maximum = _number(field.get("max"))
-    if number is None or minimum is None or maximum is None or maximum <= minimum:
+    if number is None or maximum is None or maximum <= 0:
         return None
-    number = min(max(float(number), minimum), maximum)
-    return round((number - minimum) * 255 / (maximum - minimum))
+    if minimum is not None:
+        number = max(float(number), float(minimum))
+    number = min(float(number), float(maximum))
+    return round(number * 255 / maximum)
 
 
 def _ha_brightness_to_device(
     value: Any,
     field: Mapping[str, Any],
 ) -> int:
-    minimum = _number(field.get("min"))
+    """Convert HA's 0-255 brightness back to the device percentage."""
+
     maximum = _number(field.get("max"))
-    if minimum is None or maximum is None or maximum <= minimum:
+    minimum = _number(field.get("min"))
+    if maximum is None or maximum <= 0 or minimum is None or maximum <= minimum:
         raise ValueError("2KJ0 brightness range is missing from the Profile")
     number = _number(value)
     if number is None:
         number = 0.0
     number = min(max(float(number), 0.0), 255.0)
-    device_value = minimum + number * (maximum - minimum) / 255
-    return int(round(device_value))
+    device_value = number * maximum / 255
+    return int(round(max(device_value, float(minimum))))
 
 
 async def _turn_on(context: DeviceContext, data: Mapping[str, Any]) -> None:

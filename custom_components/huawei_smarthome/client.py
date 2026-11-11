@@ -7,7 +7,6 @@ from collections.abc import Iterable, Mapping
 from dataclasses import replace
 from datetime import datetime, timezone
 import logging
-import uuid
 from typing import Protocol
 
 from .api.client import SmartHomeDiscoveryApi
@@ -15,6 +14,7 @@ from .api.errors import AuthExpiredError
 from .auth.huawei import HuaweiSmartHomeAuthProvider
 from .auth.session import SessionManager
 from .const import (
+    ONECONNECT_GATEWAY_PROD_ID,
     OBSERVED_MQTT_FILTER,
     OBSERVED_MQTT_PORT,
     OBSERVED_MQTT_SUBSCRIPTION_QOS,
@@ -165,7 +165,6 @@ class HuaweiSmartHomeClient:
         stored = await self.state_store.async_load()
         if stored is not None:
             self.state = stored
-        self._sync_protocol_devices()
         self.state.selected_home_ids = self.selected_home_ids or frozenset()
         self.state.connection = ConnectionState.AUTHENTICATING
         try:
@@ -263,7 +262,9 @@ class HuaweiSmartHomeClient:
         self.state.connection = ConnectionState.DISCOVERING
         snapshot = await self.api.async_get_snapshot(session)
         snapshot = self._scope_snapshot(snapshot)
+        snapshot = self._filter_discovery_snapshot(snapshot)
         snapshot = await self._hydrate_device_details(session, snapshot)
+        snapshot = self._filter_discovery_snapshot(snapshot)
         snapshot = await self._enrich_product_metadata(snapshot)
         if not snapshot.complete:
             raise RuntimeError("Huawei SmartHome snapshot is incomplete")
@@ -371,6 +372,60 @@ class HuaweiSmartHomeClient:
                 )
                 for dev_id, home_ids in snapshot.device_home_index.items()
                 if any(home_id in selected for home_id in home_ids)
+            },
+        )
+
+    @staticmethod
+    def _filter_discovery_snapshot(
+        snapshot: RemoteDiscoverySnapshot,
+    ) -> RemoteDiscoverySnapshot:
+        """Remove groups and OneConnect Bridge virtual device subtrees."""
+
+        devices = tuple(snapshot.devices)
+        bridge_parent_ids = {
+            device.dev_id
+            for device in devices
+            if isinstance(device.prod_id, str)
+            and device.prod_id.strip().casefold()
+            == ONECONNECT_GATEWAY_PROD_ID.casefold()
+        }
+        excluded_ids = {
+            device.dev_id
+            for device in devices
+            if (device.node_type or "").strip().upper() == "GROUP"
+        }
+        excluded_ids.update(bridge_parent_ids)
+
+        # Child product IDs are intentionally not enumerated.  They may also
+        # be native Huawei devices; the gatewayId relationship identifies the
+        # bridge subtree without excluding those native devices.
+        blocked_gateway_ids = set(bridge_parent_ids)
+        while blocked_gateway_ids:
+            children = {
+                device.dev_id
+                for device in devices
+                if device.gateway_id in blocked_gateway_ids
+            }
+            new_children = children - blocked_gateway_ids
+            if not new_children:
+                break
+            blocked_gateway_ids.update(new_children)
+            excluded_ids.update(new_children)
+
+        filtered_devices = tuple(
+            device for device in devices if device.dev_id not in excluded_ids
+        )
+        if len(filtered_devices) == len(devices):
+            return snapshot
+        device_home_index: dict[str, set[str]] = {}
+        for device in filtered_devices:
+            device_home_index.setdefault(device.dev_id, set()).add(device.home_id)
+        return replace(
+            snapshot,
+            devices=filtered_devices,
+            device_home_index={
+                dev_id: frozenset(home_ids)
+                for dev_id, home_ids in device_home_index.items()
             },
         )
 
@@ -651,13 +706,13 @@ class HuaweiSmartHomeClient:
         """Create a fresh message-center context and MQTT generation."""
 
         async with self._operation_lock:
-            await self.api.async_login_message_center(session)
+            channel = await self.api.async_login_message_center(session)
             route = await self.api.async_select_cloud_route(session)
             settings = MqttConnectionSettings(
                 broker_host=route.smart_home_host,
                 broker_port=OBSERVED_MQTT_PORT,
-                client_id=str(uuid.uuid4()).upper(),
-                subscription_filters=(OBSERVED_MQTT_FILTER,),
+                client_id=channel.mqtt_client_id,
+                subscription_filters=(OBSERVED_MQTT_FILTER, channel.mqtt_topic),
                 subscription_qos=OBSERVED_MQTT_SUBSCRIPTION_QOS,
                 username=session.user_id,
                 password=session.oauth_access_token,
@@ -736,12 +791,8 @@ class HuaweiSmartHomeClient:
         descriptor: RemoteDeviceDescriptor,
     ) -> HuaweiProductAdapter | None:
         if not isinstance(descriptor.prod_id, str):
-            _LOGGER.warning("Device %s has no prod_id (model: %s, dev_id: %s)", descriptor.name, descriptor.model, descriptor.dev_id)
             return None
-        res = self._adapters.get(descriptor.prod_id.strip().casefold())
-        if "德施曼" in descriptor.name or "21RM" in descriptor.prod_id:
-            _LOGGER.warning("Checking lock adapter: prod_id=%r, found=%r", descriptor.prod_id, res)
-        return res
+        return self._adapters.get(descriptor.prod_id.strip().casefold())
 
     def _sync_protocol_devices(self) -> None:
         current: dict[tuple[str, str], DeviceContext] = {}
@@ -754,12 +805,6 @@ class HuaweiSmartHomeClient:
             context = self._protocol_devices.get(key)
             profile = self._profile_for_device(descriptor)
             adapter = self._adapter_for_device(descriptor)
-            _LOGGER.error("SYNC DEVICE: name=%s model=%s prod_id=%s adapter=%s profile=%s", descriptor.name, descriptor.model, descriptor.prod_id, adapter is not None, profile is not None)
-            if adapter is not None and profile is None and hasattr(adapter, 'fallback_profile'):
-                profile = adapter.fallback_profile
-            if adapter is None and "德施曼" in (descriptor.name or ""):
-                adapter = self._adapters.get("21rm")
-                _LOGGER.warning("Force mapped 德施曼 to 21RM adapter! descriptor prod_id=%r", descriptor.prod_id)
             if context is None:
                 context = DeviceContext(
                     descriptor,

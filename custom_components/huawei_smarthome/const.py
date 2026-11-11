@@ -5,6 +5,10 @@ from __future__ import annotations
 DOMAIN = "huawei_smarthome"
 MANUFACTURER = "Huawei SmartHome"
 
+SERVICE_VOICE_COMMAND = "voice_command"
+ATTR_COMMAND = "command"
+ATTR_SILENT = "silent"
+
 CONF_ACCOUNT = "account"
 CONF_USER_ID = "user_id"
 CONF_IDENTITY_FINGERPRINT = "identity_fingerprint"
@@ -55,7 +59,14 @@ PLATFORMS = (
     "cover",
     "event",
     "humidifier",
+    "water_heater",
     "lock",
     "media_player",
+    "notify",
+    "text",
 )
 UNASSIGNED_HOME_ID = "__unassigned__"
+
+# OneConnect Bridge registers one virtual parent gateway.  Its child products
+# are user-selected and must be filtered through the gatewayId relationship.
+ONECONNECT_GATEWAY_PROD_ID = "ZG37"
